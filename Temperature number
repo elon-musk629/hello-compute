@@ -1,0 +1,139 @@
+// 
+// Temporary Number Demo - Glitch-ready
+// --- IMPORTANT ---
+// This demo uses a mock in-memory number pool and does NOT integrate with
+// any telephony provider. It is safe for UI/testing purposes only.
+
+const express = require('express');
+const bodyParser = require('body-parser');
+const helmet = require('helmet');
+const path = require('path');
+
+const app = express();
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+app.use(helmet());
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Config
+const DEFAULT_TTL_MINUTES = 5;
+const PORT = process.env.PORT || 3000;
+
+// In-memory mock pool and sessions (demo only)
+const mockNumbers = [
+  '+1 (555) 010-1111',
+  '+1 (555) 010-2222',
+  '+1 (555) 010-3333',
+  '+1 (555) 010-4444',
+  '+1 (555) 010-5555'
+];
+
+const pool = mockNumbers.map(n => ({ phone: n, status: 'available' }));
+const sessions = {}; // sessionId -> { id, phone, expiresAt, purpose, createdAt }
+
+// Utility
+function allocateNumber() {
+  const item = pool.find(p => p.status === 'available');
+  if (!item) return null;
+  item.status = 'allocated';
+  return item.phone;
+}
+function releaseNumber(phone) {
+  const item = pool.find(p => p.phone === phone);
+  if (!item) return;
+  item.status = 'available';
+}
+
+// Clean up expired sessions periodically
+setInterval(() => {
+  const now = Date.now();
+  Object.values(sessions).forEach(s => {
+    if (s.expiresAt <= now && s.status !== 'expired') {
+      s.status = 'expired';
+      s.expiredAt = new Date().toISOString();
+      // move to quarantine in a real system; here we release immediately for demo
+      releaseNumber(s.phone);
+    }
+  });
+}, 10 * 1000);
+
+// Routes
+app.get('/', (req, res) => {
+  res.render('index', { defaultTtl: DEFAULT_TTL_MINUTES });
+});
+
+app.get('/tos', (req, res) => {
+  res.render('tos');
+});
+
+app.get('/privacy', (req, res) => {
+  res.render('privacy');
+});
+
+app.post('/generate', (req, res) => {
+  const purpose = (req.body.purpose || '').trim();
+  const ttlMinutes = Math.min(Math.max(parseInt(req.body.ttl) || DEFAULT_TTL_MINUTES, 1), 60);
+  const consent = req.body.consent === 'on';
+
+  if (!consent) return res.status(400).send('You must accept Terms of Service.');
+  if (!purpose) return res.status(400).send('Purpose required.');
+
+  const phone = allocateNumber();
+  if (!phone) return res.status(503).send('No numbers available right now. Try again later.');
+
+  const id = generateId();
+  const now = Date.now();
+  const expiresAt = now + ttlMinutes * 60 * 1000;
+
+  sessions[id] = {
+    id,
+    phone,
+    purpose,
+    createdAt: new Date(now).toISOString(),
+    expiresAt,
+    status: 'active'
+  };
+
+  // Render session page
+  res.redirect(`/session/${id}`);
+});
+
+app.get('/session/:id', (req, res) => {
+  const s = sessions[req.params.id];
+  if (!s) return res.status(404).send('Session not found.');
+  res.render('session', { session: s, now: Date.now() });
+});
+
+// Endpoint to fetch session status (for polling)
+app.get('/api/session/:id', (req, res) => {
+  const s = sessions[req.params.id];
+  if (!s) return res.status(404).json({ error: 'not_found' });
+  const now = Date.now();
+  const remainingMs = Math.max(0, s.expiresAt - now);
+  if (s.status !== 'expired' && s.expiresAt <= now) {
+    s.status = 'expired';
+  }
+  res.json({
+    id: s.id,
+    phone: s.phone,
+    purpose: s.purpose,
+    status: s.status,
+    expiresAt: s.expiresAt,
+    remainingMs
+  });
+});
+
+// Simple utility route to view pool (demo-only)
+app.get('/pool', (req, res) => {
+  res.json({ pool, sessions });
+});
+
+function generateId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+// Start
+app.listen(PORT, () => {
+  console.log(`Temp Number Demo running on http://localhost:${PORT} (or the Glitch URL)`);
+});
